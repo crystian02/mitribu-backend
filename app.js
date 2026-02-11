@@ -36,8 +36,9 @@ app.get('/', (req, res) => {
 });
 
 // Iniciar Servidor
-server.listen(port, () => {
-  console.log(`🚀 Backend corriendo en http://localhost:${port}`);
+// ✅ CÓDIGO CORREGIDO (Funciona en Render)
+server.listen(port, '0.0.0.0', () => {
+  console.log(`🚀 Backend corriendo en el puerto ${port}`);
 });
 
 module.exports = app;
