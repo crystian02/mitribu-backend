@@ -12,7 +12,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(logger('dev'));
-app.use(cors()); // Vital para que el Frontend (React) pueda llamar a los Pagos
+app.use(cors()); 
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
@@ -30,13 +30,22 @@ paymentController.controller(app, io);
 const deliveryController = require('./controllers/delivery_controller');
 deliveryController.controller(app, io);
 
-// Ruta de Salud (Para verificar que está vivo)
+// 3. Controlador de Avisos (Notificaciones Masivas + Estado Vendedor) ✅
+const adController = require('./controllers/ad_controller');
+adController.controller(app, io);
+
+// 4. NUEVO: Controlador de Soporte (Reclamos y Sugerencias) ✅
+// Este es el que falta agregar para que funcione la notificación de reclamos
+const supportController = require('./controllers/support_controller');
+supportController.controller(app, io);
+
+
+// Ruta de Salud
 app.get('/', (req, res) => {
-  res.send('🚀 MiTribu Backend Light (Pagos + GPS) Online');
+  res.send('🚀 MiTribu Backend Light (Pagos + GPS + Ads + Soporte) Online');
 });
 
 // Iniciar Servidor
-// ✅ CÓDIGO CORREGIDO (Funciona en Render)
 server.listen(port, '0.0.0.0', () => {
   console.log(`🚀 Backend corriendo en el puerto ${port}`);
 });
