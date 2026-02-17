@@ -1,50 +1,101 @@
+// controllers/support_controller.js
 const supabase = require('../services/supabase');
 const { notifyUser } = require('../utils/notification_helper');
 
-module.exports.controller = function(app, io) {
+module.exports.controller = function (app, io) {
 
-    // Crear Ticket de Soporte (Desde la App del Cliente)
-    app.post('/api/support/create', async (req, res) => {
-        const { userId, shopId, type, subject, message } = req.body;
+  // =====================================================
+  // CREAR TICKET DE SOPORTE
+  // =====================================================
+  app.post('/api/support/create', async (req, res) => {
 
-        try {
-            // 1. Guardar el ticket en Supabase
-            const { data: ticket, error } = await supabase
-                .from('support_tickets')
-                .insert({
-                    user_id: userId,
-                    shop_id: shopId,
-                    type: type, // 'reclamo', 'sugerencia', 'bug'
-                    subject: subject,
-                    message: message,
-                    status: 'pendiente'
-                })
-                .select('*, shops(owner_id, name)') // Traer info del dueño
-                .single();
+    try {
 
-            if (error) throw error;
+      // 🔐 NO confiar en userId del cliente
+      const userId = req.user?.id;
+      const { shopId, type, subject, message } = req.body;
 
-            // 2. Notificar al DUEÑO DE LA TIENDA ✅
-            if (ticket.shops && ticket.shops.owner_id) {
-                const emoji = type === 'reclamo' ? '🚨' : '💡';
-                
-                await notifyUser(
-                    ticket.shops.owner_id,
-                    `Nuevo ${type} recibido ${emoji}`,
-                    `${subject}: ${message.substring(0, 40)}...`,
-                    { 
-                        type: 'support_ticket', 
-                        ticketId: ticket.id,
-                        route: '/vendor/support' // Ruta interna de la app vendedor
-                    }
-                );
-            }
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          error: "No autenticado"
+        });
+      }
 
-            return res.json({ success: true, ticketId: ticket.id });
+      if (!shopId || !type || !subject || !message) {
+        return res.status(400).json({
+          success: false,
+          error: "Faltan campos obligatorios"
+        });
+      }
 
-        } catch (err) {
-            console.error('Error support:', err);
-            return res.status(500).json({ success: false, error: err.message });
-        }
-    });
+      // Validar tipo permitido
+      const allowedTypes = ['reclamo', 'sugerencia', 'bug', 'otro'];
+      if (!allowedTypes.includes(type)) {
+        return res.status(400).json({
+          success: false,
+          error: "Tipo inválido"
+        });
+      }
+
+      // 1️⃣ Guardar ticket
+      const { data: ticket, error } = await supabase
+        .from('support_tickets')
+        .insert({
+          user_id: userId,
+          shop_id: shopId,
+          type: type,
+          subject: subject,
+          message: message,
+          status: 'pendiente'
+        })
+        .select('*, shops(owner_id, name)')
+        .single();
+
+      if (error) throw error;
+
+      // 2️⃣ Notificar dueño de la tienda
+      if (ticket.shops?.owner_id) {
+
+        const emoji =
+          type === 'reclamo' ? '🚨' :
+          type === 'bug' ? '🐛' :
+          type === 'sugerencia' ? '💡' : '📩';
+
+        await notifyUser(
+          ticket.shops.owner_id,
+          `Nuevo ${type} recibido ${emoji}`,
+          `${subject.substring(0, 50)}`,
+          {
+            type: 'support_ticket',
+            ticketId: ticket.id,
+            route: '/vendor/support'
+          }
+        );
+
+        // 3️⃣ Emitir evento en tiempo real al dashboard vendedor
+        io.emit(`new_support_ticket_shop_${shopId}`, {
+          ticket_id: ticket.id,
+          subject: subject,
+          type: type,
+          status: 'pendiente'
+        });
+      }
+
+      return res.json({
+        success: true,
+        ticketId: ticket.id
+      });
+
+    } catch (err) {
+
+      console.error('❌ Error support:', err);
+
+      return res.status(500).json({
+        success: false,
+        error: err.message
+      });
+    }
+  });
+
 };

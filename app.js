@@ -21,7 +21,38 @@ app.use(express.urlencoded({ extended: false }));
 
 // Servidor HTTP + Sockets
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const io = new Server(server, {
+  cors: {
+    origin: process.env.FRONTEND_URL || '*',
+    methods: ["GET", "POST"]
+  }
+});
+
+const supabase = require('./services/supabase');
+
+// 🔐 Middleware de autenticación para Socket.IO
+io.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth?.token;
+
+    if (!token) {
+      return next(new Error("Token requerido"));
+    }
+
+    const { data, error } = await supabase.auth.getUser(token);
+
+    if (error || !data?.user) {
+      return next(new Error("Token inválido o expirado"));
+    }
+
+    socket.user = data.user;
+
+    next();
+
+  } catch (err) {
+    next(new Error("Error autenticando socket"));
+  }
+});
 
 // --- CARGA DE CONTROLADORES ESENCIALES ---
 
