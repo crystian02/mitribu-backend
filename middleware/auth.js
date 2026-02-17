@@ -37,7 +37,7 @@ const authenticate = async (req, res, next) => {
 // =====================================================
 // 🛡 REQUIRE ROLE DINÁMICO
 // =====================================================
-const requireRole = (role) => {
+const requireRole = (rolesAllowed) => {
   return async (req, res, next) => {
 
     try {
@@ -48,7 +48,7 @@ const requireRole = (role) => {
 
       const { data: profile, error } = await supabase
         .from('profiles')
-        .select('role')
+        .select('roles')
         .eq('id', req.user.id)
         .single();
 
@@ -56,9 +56,22 @@ const requireRole = (role) => {
         return res.status(403).json({ error: 'Perfil no encontrado' });
       }
 
-      if (profile.role !== role) {
+      if (!profile.roles || !Array.isArray(profile.roles)) {
+        return res.status(403).json({ error: 'Roles no configurados correctamente' });
+      }
+
+      // Permitir string o array
+      const allowedRoles = Array.isArray(rolesAllowed)
+        ? rolesAllowed
+        : [rolesAllowed];
+
+      const hasPermission = allowedRoles.some(role =>
+        profile.roles.includes(role)
+      );
+
+      if (!hasPermission) {
         return res.status(403).json({
-          error: `Acceso denegado: requiere rol ${role}`
+          error: `Acceso denegado: requiere uno de estos roles: ${allowedRoles.join(', ')}`
         });
       }
 
