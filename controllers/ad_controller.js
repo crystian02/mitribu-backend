@@ -2,7 +2,7 @@
 const supabase = require('../services/supabase');
 const NotificationService = require('../services/notification_service');
 const { notifyUser } = require('../utils/notification_helper');
-const { isAdmin } = require('../middleware/isAdmin');
+const { isAdmin } = require('../middleware/auth');
 
 module.exports.controller = function (app, io) {
 
