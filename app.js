@@ -30,7 +30,7 @@ const io = new Server(server, {
 
 const supabase = require('./services/supabase');
 
-// 🔐 Middleware de autenticación para Socket.IO
+//  Middleware de autenticación para Socket.IO
 io.use(async (socket, next) => {
   try {
     const token = socket.handshake.auth?.token;
