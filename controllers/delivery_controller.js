@@ -99,6 +99,22 @@ module.exports.controller = (app, io) => {
       }
     });
 
+    // ==========================================
+    // ✅ NUEVO EVENTO: DETENER TRACKING AL ENTREGAR
+    // ==========================================
+    socket.on('stop_delivery_gps', (order_id) => {
+      // 1. Avisar a la app del cliente que la entrega finalizó
+      io.to(`order_${order_id}`).emit('delivery_completed', {
+        message: 'El pedido ha sido entregado exitosamente'
+      });
+
+      // 2. Limpiar la ubicación del repartidor de la memoria RAM del servidor
+      if (global.delivery_positions[driver_id]) {
+        delete global.delivery_positions[driver_id];
+        console.log(`🏁 Tracking finalizado para orden ${order_id}. Memoria liberada.`);
+      }
+    });
+
     socket.on('join_order_tracking', (order_id) => {
       socket.join(`order_${order_id}`);
     });
