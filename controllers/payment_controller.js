@@ -1,3 +1,4 @@
+// controllers/payment_controller.js
 const { WebpayPlus } = require('transbank-sdk');
 const supabase = require('../services/supabase');
 
@@ -124,7 +125,22 @@ module.exports.controller = (app, io) => {
 
         const uuidOriginal = paymentRecord.order_id;
 
-        // ✅ PASO 3: Actualizar la orden original como pagada
+        // ✅ PASO 3: GENERAR EL TOKEN QR PARA EL REPARTIDOR
+        const qrSecret = Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+        const { error: tokenError } = await supabase
+          .from('delivery_tokens')
+          .insert({
+            order_id: uuidOriginal,
+            qr_secret: qrSecret
+          });
+          
+        if (tokenError) {
+          console.error("❌ Error generando delivery_token:", tokenError.message);
+        } else {
+          console.log("✅ Token de entrega (QR) generado y guardado.");
+        }
+
+        // ✅ PASO 4: Actualizar la orden original como pagada
         const { data: order, error: orderError } = await supabase
           .from('orders')
           .update({ status: 'paid', updated_at: new Date() })
@@ -136,7 +152,7 @@ module.exports.controller = (app, io) => {
           console.error("❌ Error actualizando orden original:", orderError.message);
         }
 
-        // ✅ PASO 4: Notificaciones en tiempo real mediante Sockets
+        // ✅ PASO 5: Notificaciones en tiempo real mediante Sockets
         if (order) {
           io.emit(`new_paid_order_shop_${order.shop_id}`, {
             order_id: uuidOriginal,
