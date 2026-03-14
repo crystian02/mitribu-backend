@@ -7,31 +7,27 @@ module.exports.controller = (app, io) => {
   // 1️⃣ INICIAR PAGO (Create Transaction)
   // =====================================================
   app.post('/api/payments/create', async (req, res) => {
-    // buyOrder es el UUID original del pedido (36 caracteres)
     const { buyOrder, sessionId, amount } = req.body;
 
     const host = process.env.RENDER_EXTERNAL_URL || process.env.API_URL || 'http://localhost:10000';
     const returnUrl = `${host}/api/payments/confirm`;
 
     try {
-      // 🚀 SOLUCIÓN AL ERROR DE LONGITUD:
-      // Transbank solo acepta 26 caracteres. Generamos un ID corto usando 
-      // los primeros 8 caracteres del UUID + un timestamp único.
+      // Generamos el ID corto para Transbank (Max 26 caracteres)
       const shortBuyOrder = `${buyOrder.substring(0, 8)}-${Date.now().toString().slice(-10)}`;
       
       console.log(`🚀 Iniciando pago: Orden ${buyOrder} (ID Transbank: ${shortBuyOrder}) por $${amount}`);
 
       // 1. Registrar el intento en la tabla 'payments'
-      // Guardamos tanto el UUID original (order_id) como el ID corto (buy_order)
       const { error: paymentError } = await supabase
         .from('payments')
         .insert({
-          order_id: buyOrder,      // UUID de 36 caracteres para tu base de datos
+          order_id: buyOrder,      // UUID de 36 caracteres para tu DB
           user_id: sessionId,       
           amount: parseInt(amount), 
           status: 'pending',        
           provider: 'webpay',
-          buy_order: shortBuyOrder  // ID de máximo 26 caracteres para Transbank
+          buy_order: shortBuyOrder  // ID corto para Transbank
         });
 
       if (paymentError) {
@@ -42,7 +38,7 @@ module.exports.controller = (app, io) => {
         });
       }
 
-      // 2. Crear la transacción en Transbank usando el ID corto
+      // 2. Crear transacción en Transbank
       const createResponse = await new WebpayPlus.Transaction().create(
         shortBuyOrder, 
         sessionId, 
@@ -66,7 +62,7 @@ module.exports.controller = (app, io) => {
   // =====================================================
   app.all('/api/payments/confirm', async (req, res) => {
     const token = req.body.token_ws || req.query.token_ws;
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    const frontendUrl = process.env.FRONTEND_URL || 'https://mitribu-backend.onrender.com';
 
     if (!token) {
       return res.send(`
@@ -80,13 +76,12 @@ module.exports.controller = (app, io) => {
       const tx = new WebpayPlus.Transaction();
       const commitResponse = await tx.commit(token);
 
-      // Transbank nos devuelve el 'buy_order' (el ID corto que generamos)
       const { buy_order, status, authorization_code, card_detail, transaction_date } = commitResponse;
 
       if (status === 'AUTHORIZED') {
         console.log("✅ Pago autorizado con éxito:", buy_order);
 
-        // 1. Buscamos el UUID original usando el ID corto de Transbank
+        // 1. BUSQUEDA CORREGIDA: Usamos 'buy_order' (ID corto) para encontrar el registro
         const { data: paymentRecord, error: fetchError } = await supabase
           .from('payments')
           .update({
@@ -97,15 +92,18 @@ module.exports.controller = (app, io) => {
             transaction_date: transaction_date,
             updated_at: new Date()
           })
-          .eq('buy_order', buy_order) // Filtramos por el ID corto
+          .eq('buy_order', buy_order) // <--- CAMBIO CLAVE: Buscamos por el ID corto
           .select('order_id')
           .single();
 
-        if (fetchError || !paymentRecord) throw new Error("No se encontró el registro del pago");
+        if (fetchError || !paymentRecord) {
+           console.error("❌ No se encontró el registro con buy_order:", buy_order);
+           throw new Error("No se encontró el registro del pago");
+        }
 
-        const uuidOriginal = paymentRecord.order_id;
+        const uuidOriginal = paymentRecord.order_id; // Ahora tenemos el UUID real
 
-        // 2. Actualizar la Orden original (UUID) como pagada
+        // 2. Actualizar la Orden original usando el UUID
         const { data: order } = await supabase
           .from('orders')
           .update({ status: 'paid', updated_at: new Date() })
@@ -113,7 +111,7 @@ module.exports.controller = (app, io) => {
           .select('shop_id, customer_id')
           .single();
 
-        // 3. Notificaciones en tiempo real
+        // 3. Notificaciones Sockets
         if (order) {
           io.emit(`new_paid_order_shop_${order.shop_id}`, {
             order_id: uuidOriginal,
