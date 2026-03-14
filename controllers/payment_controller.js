@@ -7,28 +7,31 @@ module.exports.controller = (app, io) => {
   // 1️⃣ INICIAR PAGO (Create Transaction)
   // =====================================================
   app.post('/api/payments/create', async (req, res) => {
-    // buyOrder es el ID del pedido (UUID) y sessionId es el ID del usuario
+    // buyOrder es el UUID original del pedido (36 caracteres)
     const { buyOrder, sessionId, amount } = req.body;
 
-    // Detectar automáticamente la URL de Render para construir el retorno de Transbank
-    // Transbank requiere HTTPS y una URL pública (no localhost)
     const host = process.env.RENDER_EXTERNAL_URL || process.env.API_URL || 'http://localhost:10000';
     const returnUrl = `${host}/api/payments/confirm`;
 
     try {
-      console.log(`🚀 Iniciando pago: Orden ${buyOrder} por $${amount}`);
+      // 🚀 SOLUCIÓN AL ERROR DE LONGITUD:
+      // Transbank solo acepta 26 caracteres. Generamos un ID corto usando 
+      // los primeros 8 caracteres del UUID + un timestamp único.
+      const shortBuyOrder = `${buyOrder.substring(0, 8)}-${Date.now().toString().slice(-10)}`;
+      
+      console.log(`🚀 Iniciando pago: Orden ${buyOrder} (ID Transbank: ${shortBuyOrder}) por $${amount}`);
 
-      // 1. Registrar el intento en la tabla 'payments' de Supabase
-      // Se requiere que services/supabase.js use la SERVICE_ROLE_KEY para saltar RLS
+      // 1. Registrar el intento en la tabla 'payments'
+      // Guardamos tanto el UUID original (order_id) como el ID corto (buy_order)
       const { error: paymentError } = await supabase
         .from('payments')
         .insert({
-          order_id: buyOrder,      
+          order_id: buyOrder,      // UUID de 36 caracteres para tu base de datos
           user_id: sessionId,       
-          amount: parseInt(amount), // Webpay Plus solo acepta montos enteros
+          amount: parseInt(amount), 
           status: 'pending',        
           provider: 'webpay',
-          buy_order: `BT-${Date.now()}` // Identificador único para la sesión de Transbank
+          buy_order: shortBuyOrder  // ID de máximo 26 caracteres para Transbank
         });
 
       if (paymentError) {
@@ -39,10 +42,9 @@ module.exports.controller = (app, io) => {
         });
       }
 
-      // 2. Crear la transacción en Transbank Webpay Plus
-      // Se usan las variables de entorno configuradas en Render (TBK_API_KEY, etc)
+      // 2. Crear la transacción en Transbank usando el ID corto
       const createResponse = await new WebpayPlus.Transaction().create(
-        buyOrder, 
+        shortBuyOrder, 
         sessionId, 
         parseInt(amount), 
         returnUrl
@@ -51,8 +53,6 @@ module.exports.controller = (app, io) => {
       res.json(createResponse);
 
     } catch (error) {
-      // Si llegamos aquí, es probable que las credenciales de Transbank estén mal 
-      // o la URL de retorno no sea HTTPS/válida.
       console.error("❌ Error crítico en Webpay Create:", error.message);
       res.status(500).json({ 
         error: 'Error de conexión con el proveedor de pagos',
@@ -65,13 +65,10 @@ module.exports.controller = (app, io) => {
   // 2️⃣ CONFIRMAR PAGO (Commit Transaction)
   // =====================================================
   app.all('/api/payments/confirm', async (req, res) => {
-    // Transbank envía el token vía POST o GET dependiendo del flujo
     const token = req.body.token_ws || req.query.token_ws;
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
 
     if (!token) {
-      console.log("⚠️ Pago anulado: No se recibió token del usuario");
-      // Redirigir al cliente a una pantalla de fallo en la App
       return res.send(`
         <script>
           window.location.href="${frontendUrl}/api/payments/confirm/result?status=failed&reason=user_aborted"
@@ -83,13 +80,14 @@ module.exports.controller = (app, io) => {
       const tx = new WebpayPlus.Transaction();
       const commitResponse = await tx.commit(token);
 
+      // Transbank nos devuelve el 'buy_order' (el ID corto que generamos)
       const { buy_order, status, authorization_code, card_detail, transaction_date } = commitResponse;
 
       if (status === 'AUTHORIZED') {
         console.log("✅ Pago autorizado con éxito:", buy_order);
 
-        // 1. Actualizar el registro del Pago como exitoso
-        await supabase
+        // 1. Buscamos el UUID original usando el ID corto de Transbank
+        const { data: paymentRecord, error: fetchError } = await supabase
           .from('payments')
           .update({
             status: 'paid', 
@@ -99,54 +97,53 @@ module.exports.controller = (app, io) => {
             transaction_date: transaction_date,
             updated_at: new Date()
           })
-          .eq('order_id', buy_order);
+          .eq('buy_order', buy_order) // Filtramos por el ID corto
+          .select('order_id')
+          .single();
 
-        // 2. Marcar la Orden como pagada para que el comercio empiece a preparar
+        if (fetchError || !paymentRecord) throw new Error("No se encontró el registro del pago");
+
+        const uuidOriginal = paymentRecord.order_id;
+
+        // 2. Actualizar la Orden original (UUID) como pagada
         const { data: order } = await supabase
           .from('orders')
           .update({ status: 'paid', updated_at: new Date() })
-          .eq('id', buy_order)
+          .eq('id', uuidOriginal)
           .select('shop_id, customer_id')
           .single();
 
-        // 3. Notificar en tiempo real mediante Sockets
+        // 3. Notificaciones en tiempo real
         if (order) {
-          // Notificar al panel del Vendedor
           io.emit(`new_paid_order_shop_${order.shop_id}`, {
-            order_id: buy_order,
+            order_id: uuidOriginal,
             status: 'paid'
           });
-          // Notificar al cliente en la App móvil
           io.emit(`order_update_user_${order.customer_id}`, {
-            order_id: buy_order,
+            order_id: uuidOriginal,
             status: 'paid'
           });
         }
 
-        // Redirección de éxito capturada por el WebView en Flutter
         return res.send(`
           <script>
-            window.location.href="${frontendUrl}/api/payments/confirm/result?status=paid&order=${buy_order}"
+            window.location.href="${frontendUrl}/api/payments/confirm/result?status=paid&order=${uuidOriginal}"
           </script>
         `);
 
       } else {
         console.log("❌ Pago rechazado por Transbank:", status);
+        await supabase.from('payments').update({ status: 'failed' }).eq('buy_order', buy_order);
         
-        await supabase
-          .from('payments')
-          .update({ status: 'failed', updated_at: new Date() })
-          .eq('order_id', buy_order);
-
         return res.send(`
           <script>
-            window.location.href="${frontendUrl}/api/payments/confirm/result?status=failed&order=${buy_order}"
+            window.location.href="${frontendUrl}/api/payments/confirm/result?status=failed"
           </script>
         `);
       }
 
     } catch (error) {
-      console.error("❌ Error en Proceso de Confirmación (Commit):", error.message);
+      console.error("❌ Error en Confirmación:", error.message);
       res.status(500).send("Error interno procesando la confirmación del pago.");
     }
   });
