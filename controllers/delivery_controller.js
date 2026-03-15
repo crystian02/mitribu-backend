@@ -35,9 +35,7 @@ module.exports.controller = (app, io) => {
   io.on('connection', (socket) => {
     console.log('✅ Dispositivo de tracking conectado:', socket.id);
 
-    // 🔐 IMPORTANTE:
-    // NO confiamos en driver_id enviado por cliente.
-    // Usamos el usuario autenticado del socket.
+    // 🔐 IMPORTANTE: Usamos el usuario autenticado del socket.
     const driver_id = socket.user?.id;
 
     if (!driver_id) {
@@ -47,7 +45,6 @@ module.exports.controller = (app, io) => {
 
     socket.on('update_delivery_gps', async (data) => {
       try {
-
         const { lat, lon, order_id, vehicle_id } = data;
         const now = new Date();
 
@@ -67,8 +64,16 @@ module.exports.controller = (app, io) => {
           updated_at: now
         };
 
-        // 2️⃣ Emitir SOLO a clientes que escuchan ese pedido
+        // 2️⃣ Emitir a los clientes (APP MÓVIL)
+        // El cliente en Flutter debe unirse a esta sala 'order_XYZ'
         io.to(`order_${order_id}`).emit('delivery_position_update', {
+          lat,
+          lon
+        });
+
+        // ✅ NUEVO: Emitir al PANEL WEB (React Dashboard)
+        // El componente DeliveryMap.jsx escucha este evento exacto
+        io.emit(`tracking_order_${order_id}`, {
           lat,
           lon
         });
@@ -100,7 +105,7 @@ module.exports.controller = (app, io) => {
     });
 
     // ==========================================
-    // ✅ NUEVO EVENTO: DETENER TRACKING AL ENTREGAR
+    // DETENER TRACKING AL ENTREGAR
     // ==========================================
     socket.on('stop_delivery_gps', (order_id) => {
       // 1. Avisar a la app del cliente que la entrega finalizó
@@ -129,7 +134,6 @@ module.exports.controller = (app, io) => {
   // ENDPOINT REST (última ubicación)
   // ==========================================
   app.get('/api/delivery/location/:driver_id', (req, res) => {
-
     const pos = global.delivery_positions[req.params.driver_id];
 
     if (!pos) {
