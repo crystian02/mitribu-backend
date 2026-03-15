@@ -31,7 +31,7 @@ module.exports.controller = (app, io) => {
   });
 
   // =====================================================
-  // 2️⃣ CONFIRMAR PAGO Y DESCONTAR STOCK (Commit)
+  // 2️⃣ CONFIRMAR PAGO Y DESCONTAR STOCK MULTI-TIENDA (Commit)
   // =====================================================
   app.all('/api/payments/confirm', async (req, res) => {
     const token = req.body.token_ws || req.query.token_ws;
@@ -50,52 +50,64 @@ module.exports.controller = (app, io) => {
       if (status === 'AUTHORIZED') {
         const uuidOriginal = paymentRecord.order_id;
 
-        // 1. Actualizar pago
+        // 1. Actualizar estado del pago en la tabla payments
         await supabase.from('payments').update({
           status: 'paid', token: token, authorization_code: authorization_code,
           card_last4: card_detail?.card_number?.slice(-4), transaction_date: transaction_date, updated_at: new Date()
         }).eq('buy_order', buy_order);
 
-        // 2. Crear QR
-        const qrSecret = Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
-        await supabase.from('delivery_tokens').insert({ order_id: uuidOriginal, qr_secret: qrSecret });
+        // 2. Verificar si la orden pertenece a un Lote (Multi-Tienda)
+        const { data: mainOrder } = await supabase.from('orders').select('batch_id, shop_id, customer_id').eq('id', uuidOriginal).single();
 
-        // 3. Actualizar Orden
-        const { data: order } = await supabase.from('orders').update({ status: 'paid', updated_at: new Date() }).eq('id', uuidOriginal).select('shop_id, customer_id').single();
+        let ordersToProcess = [];
 
-        // =========================================================
-        // ✅ AQUÍ ESTÁ LO QUE FALTABA: DESCONTAR STOCK AL VENDER
-        // =========================================================
-        console.log("📉 Descontando stock de los productos vendidos...");
-        
-        const { data: orderItems } = await supabase
-          .from('order_items')
-          .select('product_id, quantity, products(shop_id)')
-          .eq('order_id', uuidOriginal);
+        if (mainOrder && mainOrder.batch_id) {
+          // Es un pedido multi-tienda: traemos todas las órdenes de este lote
+          console.log(`📦 Procesando Lote Multi-Tienda: ${mainOrder.batch_id}`);
+          const { data: batchOrders } = await supabase.from('orders').select('id, shop_id, customer_id').eq('batch_id', mainOrder.batch_id);
+          ordersToProcess = batchOrders || [];
+        } else if (mainOrder) {
+          // Es un pedido simple (compatible con versiones anteriores)
+          ordersToProcess = [{ id: uuidOriginal, shop_id: mainOrder.shop_id, customer_id: mainOrder.customer_id }];
+        }
 
-        if (orderItems && orderItems.length > 0) {
-          for (const item of orderItems) {
-            if (item.products) {
-              const { data: currentProduct } = await supabase.from('products').select('stock').eq('id', item.product_id).single();
+        // 3. Procesar cada orden (Actualizar estado, QR, Stock y Sockets)
+        for (const order of ordersToProcess) {
+          const currentOrderId = order.id;
 
-              if (currentProduct) {
-                // Evitar que el stock baje de cero (por seguridad)
-                const newStock = Math.max(0, currentProduct.stock - item.quantity); 
-                
-                await supabase.from('products').update({ stock: newStock })
-                  .eq('id', item.product_id)
-                  .eq('shop_id', item.products.shop_id); // Seguro multi-tienda
-                  
-                console.log(`➖ Stock descontado: -${item.quantity} al producto ${item.product_id} (Tienda: ${item.products.shop_id})`);
+          // A. Marcar orden como pagada
+          await supabase.from('orders').update({ status: 'paid', updated_at: new Date() }).eq('id', currentOrderId);
+
+          // B. Crear QR de entrega
+          const qrSecret = Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+          await supabase.from('delivery_tokens').insert({ order_id: currentOrderId, qr_secret: qrSecret });
+
+          // C. Descontar Stock de esta tienda
+          const { data: orderItems } = await supabase
+            .from('order_items')
+            .select('product_id, quantity, products(shop_id)')
+            .eq('order_id', currentOrderId);
+
+          if (orderItems && orderItems.length > 0) {
+            for (const item of orderItems) {
+              if (item.products) {
+                const { data: currentProduct } = await supabase.from('products').select('stock').eq('id', item.product_id).single();
+
+                if (currentProduct) {
+                  const newStock = Math.max(0, currentProduct.stock - item.quantity); 
+                  await supabase.from('products').update({ stock: newStock })
+                    .eq('id', item.product_id)
+                    .eq('shop_id', item.products.shop_id); 
+                    
+                  console.log(`➖ Stock descontado: -${item.quantity} al producto ${item.product_id} (Tienda: ${item.products.shop_id})`);
+                }
               }
             }
           }
-        }
 
-        // 5. Notificar a las apps (Sockets)
-        if (order) {
-          io.emit(`new_paid_order_shop_${order.shop_id}`, { order_id: uuidOriginal, status: 'paid' });
-          io.emit(`order_update_user_${order.customer_id}`, { order_id: uuidOriginal, status: 'paid' });
+          // D. Notificar vía Sockets al comercio y al cliente
+          io.emit(`new_paid_order_shop_${order.shop_id}`, { order_id: currentOrderId, status: 'paid' });
+          io.emit(`order_update_user_${order.customer_id}`, { order_id: currentOrderId, status: 'paid' });
         }
 
         return res.send(`<script>window.location.href="${frontendUrl}/api/payments/confirm/result?status=paid&order=${uuidOriginal}"</script>`);
@@ -117,7 +129,7 @@ module.exports.controller = (app, io) => {
     const { orderId, amount } = req.body; 
 
     try {
-      console.log(`⏪ Iniciando reembolso para orden: ${orderId}`);
+      console.log(`⏪ Iniciando reembolso para orden/lote vinculado a: ${orderId}`);
 
       const { data: payment, error: fetchError } = await supabase.from('payments').select('id, token, amount, buy_order').eq('order_id', orderId).eq('status', 'paid').single();
       if (fetchError || !payment) return res.status(404).json({ error: "No se encontró un pago aprobado para esta orden o ya fue reembolsado." });
@@ -127,31 +139,42 @@ module.exports.controller = (app, io) => {
 
       if (refundResponse.type === 'REVERSED' || refundResponse.type === 'NULLIFIED') {
         
+        // 1. Marcar el pago como reembolsado
         await supabase.from('payments').update({ status: 'refunded', updated_at: new Date() }).eq('order_id', orderId);
-        await supabase.from('orders').update({ status: 'cancelled', updated_at: new Date() }).eq('id', orderId);
         await supabase.from('payment_events').insert({ payment_id: payment.id, event_type: 'refund', raw_payload: refundResponse });
 
-        // =========================================================
-        // ✅ AQUÍ ESTÁ LO QUE FALTABA: REPONER STOCK
-        // =========================================================
-        console.log("📦 Iniciando reposición de stock en el comercio...");
+        // 2. Verificar si es Lote para cancelar y reponer todo
+        const { data: mainOrder } = await supabase.from('orders').select('batch_id').eq('id', orderId).single();
         
-        const { data: orderItems } = await supabase
-          .from('order_items')
-          .select('product_id, quantity, products(shop_id, name, stock)')
-          .eq('order_id', orderId);
+        let ordersToRefund = [];
+        if (mainOrder && mainOrder.batch_id) {
+          const { data: batchOrders } = await supabase.from('orders').select('id').eq('batch_id', mainOrder.batch_id);
+          ordersToRefund = batchOrders || [];
+        } else {
+          ordersToRefund = [{ id: orderId }];
+        }
 
-        if (orderItems && orderItems.length > 0) {
-          for (const item of orderItems) {
-            if (item.products) {
-              const newStock = item.products.stock + item.quantity;
-              await supabase.from('products').update({ stock: newStock }).eq('id', item.product_id).eq('shop_id', item.products.shop_id); 
-              console.log(`➕ Se devolvieron ${item.quantity} unidades de "${item.products.name}" a la tienda ID: ${item.products.shop_id}`);
+        // 3. Procesar anulación por cada orden
+        for (const order of ordersToRefund) {
+          await supabase.from('orders').update({ status: 'cancelled', updated_at: new Date() }).eq('id', order.id);
+
+          const { data: orderItems } = await supabase
+            .from('order_items')
+            .select('product_id, quantity, products(shop_id, name, stock)')
+            .eq('order_id', order.id);
+
+          if (orderItems && orderItems.length > 0) {
+            for (const item of orderItems) {
+              if (item.products) {
+                const newStock = item.products.stock + item.quantity;
+                await supabase.from('products').update({ stock: newStock }).eq('id', item.product_id).eq('shop_id', item.products.shop_id); 
+                console.log(`➕ Se devolvieron ${item.quantity} unidades de "${item.products.name}" a la tienda ID: ${item.products.shop_id}`);
+              }
             }
           }
         }
 
-        res.json({ success: true, message: "Reembolso y reposición procesados", details: refundResponse });
+        res.json({ success: true, message: "Reembolso y reposición multitienda procesados", details: refundResponse });
       } else {
         res.status(400).json({ error: "Transbank rechazó el reembolso", details: refundResponse });
       }
