@@ -90,16 +90,6 @@ module.exports.controller = (app, io) => {
 
       if (fetchError || !paymentRecord) {
         console.error("❌ Registro no encontrado en DB:", fetchError?.message);
-        console.error("   buy_order buscado:", buy_order);
-
-        // Debug: mostrar últimos 5 registros para diagnosticar
-        const { data: recent } = await supabase
-          .from('payments')
-          .select('buy_order, order_id, created_at')
-          .order('created_at', { ascending: false })
-          .limit(5);
-        console.error("   Últimos 5 registros en payments:", JSON.stringify(recent));
-
         return res.send(`
           <script>
             window.location.href="${frontendUrl}/api/payments/confirm/result?status=failed&reason=record_not_found"
@@ -188,6 +178,76 @@ module.exports.controller = (app, io) => {
     } catch (error) {
       console.error("❌ Error en Confirmación:", error.message);
       res.status(500).send(`Error interno procesando la confirmación: ${error.message}`);
+    }
+  });
+
+  // =====================================================
+  // 3️⃣ REEMBOLSO / ANULACIÓN (Refund Transaction) - ¡ESTO FALTABA!
+  // =====================================================
+  app.post('/api/payments/refund', async (req, res) => {
+    const { orderId, amount } = req.body; 
+
+    try {
+      console.log(`⏪ Iniciando proceso de reembolso para orden: ${orderId}`);
+
+      // 1. Obtener el token de la transacción y el monto desde Supabase
+      const { data: payment, error: fetchError } = await supabase
+        .from('payments')
+        .select('id, token, amount, buy_order')
+        .eq('order_id', orderId)
+        .eq('status', 'paid')
+        .single();
+
+      if (fetchError || !payment) {
+        return res.status(404).json({ error: "No se encontró un pago aprobado para esta orden o ya fue reembolsado." });
+      }
+
+      // 2. Ejecutar Refund en Transbank (Si no envían 'amount', se reembolsa el total)
+      const refundAmount = amount ? parseInt(amount) : payment.amount;
+      const refundResponse = await new WebpayPlus.Transaction().refund(payment.token, refundAmount);
+
+      console.log("✅ Respuesta de Transbank Refund:", refundResponse);
+
+      // 3. Registrar el evento y actualizar base de datos si fue exitoso
+      if (refundResponse.type === 'REVERSED' || refundResponse.type === 'NULLIFIED') {
+        
+        // Actualizar tabla payments
+        await supabase
+          .from('payments')
+          .update({ 
+            status: 'refunded', 
+            updated_at: new Date() 
+          })
+          .eq('order_id', orderId);
+
+        // Actualizar tabla orders a 'cancelled'
+        await supabase
+          .from('orders')
+          .update({ 
+            status: 'cancelled', 
+            updated_at: new Date() 
+          })
+          .eq('id', orderId);
+
+        // Insertar en historial de eventos
+        await supabase.from('payment_events').insert({
+          payment_id: payment.id,
+          event_type: 'refund',
+          raw_payload: refundResponse
+        });
+
+        res.json({
+          success: true,
+          message: "Reembolso procesado con éxito",
+          details: refundResponse
+        });
+      } else {
+        res.status(400).json({ error: "Transbank rechazó la solicitud de reembolso", details: refundResponse });
+      }
+
+    } catch (error) {
+      console.error("❌ Error en Refund:", error.message);
+      res.status(500).json({ error: error.message });
     }
   });
 
