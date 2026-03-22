@@ -109,6 +109,9 @@ module.exports.controller = (app, io) => {
           io.emit(`new_paid_order_shop_${order.shop_id}`, { order_id: currentOrderId, status: 'paid' });
           io.emit(`order_update_user_${order.customer_id}`, { order_id: currentOrderId, status: 'paid' });
         }
+        
+        // ✅ NUEVO: Notificar a todos los repartidores activos que hay un nuevo viaje disponible
+        io.emit('new_order_available');
 
         return res.send(`<script>window.location.href="${frontendUrl}/api/payments/confirm/result?status=paid&order=${uuidOriginal}"</script>`);
 
@@ -173,6 +176,9 @@ module.exports.controller = (app, io) => {
             }
           }
         }
+
+        // 💡 Opcional: Notificar a los repartidores que un pedido fue cancelado para que refresquen su lista
+        io.emit('new_order_available');
 
         res.json({ success: true, message: "Reembolso y reposición multitienda procesados", details: refundResponse });
       } else {
